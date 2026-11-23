@@ -1,73 +1,85 @@
-cmake_minimum_required(VERSION 3.20)
-project(fpv4win)
 
+cmake_minimum_required(VERSION 3.20)
+
+project(fpv4win LANGUAGES C CXX)
+
+# 1. Language standard
 set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# 2. Qt code generation
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
-
 set(CMAKE_INCLUDE_CURRENT_DIR ON)
 
+# 3. Dependencies
 find_package(PkgConfig REQUIRED)
-
 find_package(FFmpeg REQUIRED)
 find_package(SDL2 REQUIRED)
 find_package(unofficial-sodium CONFIG REQUIRED)
-pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
-include_directories(${FFMPEG_INCLUDE_DIRS})
+find_package(Qt5 REQUIRED COMPONENTS Quick Multimedia)
 
-find_package(Qt5 COMPONENTS Quick Multimedia  REQUIRED)
+pkg_check_modules(
+    LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0
+)
 
+# 4. Collect source files
+file(GLOB_RECURSE SRC_LIST CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/3rd/rtl8812au-monitor-pcap/*.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/3rd/rtl8812au-monitor-pcap/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
+)
 
-if(CMAKE_BUILD_TYPE MATCHES "Debug")
-    message("build debug")
-    add_definitions(-DDEBUG_MODE)
+# Exclude third-party example main.cpp
+list(FILTER SRC_LIST EXCLUDE
+    REGEX ".*/3rd/rtl8812au-monitor-pcap/src/main\\.cpp$"
+)
+
+# Headless receiver:
+# Remove original video player and encoder modules
+list(FILTER SRC_LIST EXCLUDE
+    REGEX ".*/src/player/.*"
+)
+
+# 5. Fix missing chrono header for RTL8812AU
+if(MSVC)
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/3rd/rtl8812au-monitor-pcap/src/HalModule.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/3rd/rtl8812au-monitor-pcap/src/RadioManagementModule.cpp"
+        PROPERTIES COMPILE_OPTIONS "/FIchrono"
+    )
 endif()
 
+# 6. Create executable
+# qml.qrc is not needed for headless receiver
+add_executable(${PROJECT_NAME} ${SRC_LIST})
 
-file(GLOB_RECURSE SRC_LIST
-        3rd/rtl8812au-monitor-pcap/*.c
-        3rd/rtl8812au-monitor-pcap/*.cpp
-        src/*.cpp
-        src/*.c
-        src/*.h
+# Include directories
+target_include_directories(${PROJECT_NAME} PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/3rd/rtl8812au-monitor-pcap/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/3rd/rtl8812au-monitor-pcap/hal"
+    ${FFMPEG_INCLUDE_DIRS}
+    ${SDL2_INCLUDE_DIRS}
 )
-list(FILTER SRC_LIST EXCLUDE REGEX ".*/3rd.*/src/main.cpp")
 
-include_directories(src 3rd/rtl8812au-monitor-pcap/src 3rd/rtl8812au-monitor-pcap/hal)
-add_executable(${PROJECT_NAME} ${SRC_LIST} qml.qrc)
+# Link libraries
+target_link_libraries(${PROJECT_NAME} PRIVATE
+    Qt5::Quick
+    Qt5::Multimedia
+    ${FFMPEG_LIBRARIES}
+    ${SDL2_LIBRARIES}
+    PkgConfig::LIBUSB
+    unofficial-sodium::sodium
+)
 
-target_link_libraries(${PROJECT_NAME}
-        Qt5::Quick ${FFMPEG_LIBRARIES}
-        ${SDL2_LIBRARIES}
-        PkgConfig::LIBUSB
-        unofficial-sodium::sodium)
+# 7. Debug configuration
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    $<$<CONFIG:Debug>:DEBUG_MODE>
+)
 
-if (WIN32 AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
-    set(DEBUG_SUFFIX)
-    if (MSVC AND CMAKE_BUILD_TYPE MATCHES "Debug")
-        set(DEBUG_SUFFIX "d")
-    endif ()
-    set(QT_INSTALL_PATH "${CMAKE_PREFIX_PATH}")
-    if (NOT EXISTS "${QT_INSTALL_PATH}/bin")
-        set(QT_INSTALL_PATH "${QT_INSTALL_PATH}/..")
-        if (NOT EXISTS "${QT_INSTALL_PATH}/bin")
-            set(QT_INSTALL_PATH "${QT_INSTALL_PATH}/..")
-        endif ()
-    endif ()
-    if (EXISTS "${QT_INSTALL_PATH}/plugins/platforms/qwindows${DEBUG_SUFFIX}.dll")
-        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E make_directory
-                "$<TARGET_FILE_DIR:${PROJECT_NAME}>/plugins/platforms/")
-        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy
-                "${QT_INSTALL_PATH}/plugins/platforms/qwindows${DEBUG_SUFFIX}.dll"
-                "$<TARGET_FILE_DIR:${PROJECT_NAME}>/plugins/platforms/")
-    endif ()
-    foreach (QT_LIB Core)
-        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy
-                "${QT_INSTALL_PATH}/bin/Qt5${QT_LIB}${DEBUG_SUFFIX}.dll"
-                "$<TARGET_FILE_DIR:${PROJECT_NAME}>")
-    endforeach (QT_LIB)
-endif ()
+# Runtime DLLs will be packaged separately
+# after successful compilation.
