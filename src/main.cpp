@@ -1,52 +1,76 @@
-﻿#include "src/QmlNativeAPI.h"
-#include <QGuiApplication>
-#include <QQmlApplicationEngine>
-#include <QQmlContext>
-#include <player/QQuickRealTimePlayer.h>
-
-#pragma comment(lib, "ws2_32.lib")
-
-#ifdef DEBUG_MODE
-#include <DbgHelp.h>
-#pragma comment(lib, "DbgHelp.lib")
-// 创建Dump文件
-void CreateDumpFile(LPCWSTR lpstrDumpFilePathName, EXCEPTION_POINTERS *pException) {
-    HANDLE hDumpFile = CreateFile(
-        reinterpret_cast<LPCSTR>(lpstrDumpFilePathName), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-        FILE_ATTRIBUTE_NORMAL, nullptr);
-    // Dump信息
-    MINIDUMP_EXCEPTION_INFORMATION dumpInfo;
-    dumpInfo.ExceptionPointers = pException;
-    dumpInfo.ThreadId = GetCurrentThreadId();
-    dumpInfo.ClientPointers = TRUE;
-    // 写入Dump文件内容
-    MiniDumpWriteDump(
-        GetCurrentProcess(), GetCurrentProcessId(), hDumpFile, MiniDumpNormal, &dumpInfo, nullptr, nullptr);
-    CloseHandle(hDumpFile);
-}
-// 处理Unhandled Exception的回调函数
-LONG ApplicationCrashHandler(EXCEPTION_POINTERS *pException) {
-    CreateDumpFile(L"dump.dmp", pException);
-    return EXCEPTION_EXECUTE_HANDLER;
-}
-
-#endif
+// Replace fpv4win/src/main.cpp with this file for a headless build.
+// Reuses the project's existing libusb/RTL8812AU/WFB-ng code.
+// This does not modify flight controls or any radio parameters beyond
+// selecting the same receive channel/width as the working fpv4win setup.
+#include "src/QmlNativeAPI.h"
+#include <QCoreApplication>
+#include <QCommandLineParser>
+#include <QFileInfo>
+#include <QObject>
+#include <QString>
+#include <QTimer>
+#include <iostream>
 
 int main(int argc, char *argv[]) {
-#ifdef DEBUG_MODE
-    SetUnhandledExceptionFilter((LPTOP_LEVEL_EXCEPTION_FILTER)ApplicationCrashHandler);
-#endif
+    QCoreApplication app(argc, argv);
+    app.setApplicationName("openipc-headless-receiver");
 
-    QGuiApplication app(argc, argv);
+    QCommandLineParser parser;
+    parser.setApplicationDescription("OpenIPC fpv4win WFB-ng receiver without video GUI; RTP sent to localhost");
+    parser.addHelpOption();
+    QCommandLineOption vidOpt({"d", "vidpid"}, "RTL8812AU VID:PID", "vidpid", "0bda:881a");
+    QCommandLineOption channelOpt({"c", "channel"}, "Wi-Fi receive channel", "channel", "161");
+    // fpv4win UI passes ComboBox index, not literal MHz: index 0 == 20 MHz.
+    QCommandLineOption widthOpt({"w", "width-index"}, "Channel width index: 0=20 MHz, 1=40 MHz, 2=80 MHz", "index", "0");
+    QCommandLineOption keyOpt({"k", "key"}, "Existing OpenIPC ground-station key file", "path", "gs.key");
+    QCommandLineOption codecOpt({"x", "codec"}, "H264, H265, or AUTO", "codec", "H265");
+    parser.addOptions({vidOpt, channelOpt, widthOpt, keyOpt, codecOpt});
+    parser.process(app);
 
-    QQmlApplicationEngine engine;
+    bool channelOk = false;
+    bool widthOk = false;
+    int channel = parser.value(channelOpt).toInt(&channelOk);
+    int widthIndex = parser.value(widthOpt).toInt(&widthOk);
+    const QString vidpid = parser.value(vidOpt).trimmed();
+    const QString codec = parser.value(codecOpt).trimmed().toUpper();
+    const QString keyFile = QFileInfo(parser.value(keyOpt)).absoluteFilePath();
+    if (!channelOk || channel < 1 || channel > 165 || !widthOk || widthIndex < 0 || widthIndex > 7) {
+        std::cerr << "Invalid receive channel or width index.\n";
+        return 2;
+    }
+    if (vidpid.size() != 9 || vidpid[4] != ':') {
+        std::cerr << "Invalid VID:PID format (expected 0bda:881a).\n";
+        return 2;
+    }
+    if (codec != "H264" && codec != "H265" && codec != "AUTO") {
+        std::cerr << "Invalid codec; use H264, H265 or AUTO.\n";
+        return 2;
+    }
+    if (!QFileInfo(keyFile).isFile()) {
+        std::cerr << "Missing key file: " << keyFile.toStdString() << "\n";
+        return 2;
+    }
 
-    qmlRegisterType<QQuickRealTimePlayer>("realTimePlayer", 1, 0, "QQuickRealTimePlayer");
+    auto &api = QmlNativeAPI::Instance();
+    QObject::connect(&api, &QmlNativeAPI::onLog, &app,
+        [](const QString &level, const QString &msg) {
+            std::cout << "[" << level.toStdString() << "] " << msg.toStdString() << std::endl;
+        }, Qt::QueuedConnection);
+    QObject::connect(&api, &QmlNativeAPI::onRtpStream, &app,
+        [](const QString &sdp) {
+            std::cout << "SDP_READY: " << QFileInfo(sdp).absoluteFilePath().toStdString() << std::endl;
+        }, Qt::QueuedConnection);
+    QObject::connect(&api, &QmlNativeAPI::onWifiStop, &app,
+        []() { std::cerr << "Receiver stopped.\n"; QCoreApplication::quit(); }, Qt::QueuedConnection);
 
-    auto &qmlNativeApi = QmlNativeAPI::Instance();
-    engine.rootContext()->setContextProperty("NativeApi", &qmlNativeApi);
-
-    engine.load(QUrl(QStringLiteral("qrc:/qml/main.qml")));
-
-    return QGuiApplication::exec();
+    std::cout << "Starting RTL8812AU receiver, channel=" << channel
+              << ", width index=" << widthIndex << ", codec=" << codec.toStdString() << std::endl;
+    std::cout << "Video RTP output: localhost:52356 (SDP generated on first RTP packet)\n";
+    const bool started = QmlNativeAPI::Start(
+        vidpid, channel, widthIndex, keyFile, codec);
+    if (!started) {
+        std::cerr << "Could not start receiver: check adapter, USB driver and other software using it.\n";
+        return 3;
+    }
+    return app.exec();
 }
