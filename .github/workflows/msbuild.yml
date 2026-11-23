@@ -1,4 +1,3 @@
-
 name: MSBuild
 
 on:
@@ -24,8 +23,7 @@ jobs:
         with:
           submodules: recursive
 
-      # Use current vcpkg instead of the old pinned commit.
-      - name: Checkout current vcpkg
+      - name: Checkout vcpkg
         uses: actions/checkout@v4
         with:
           repository: microsoft/vcpkg
@@ -40,6 +38,59 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "vcpkg bootstrap failed"
           }
+
+      # PCRE2's vcpkg port downloads a gitlink from api.github.com.
+      # Prefetch it using the automatic GitHub Actions token to avoid
+      # unauthenticated API rate limits on shared runners.
+      - name: Prefetch PCRE2 SLJIT metadata with GitHub authentication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $root = $env:GITHUB_WORKSPACE
+          $pcrePort = Join-Path $root "vcpkg\ports\pcre2\portfile.cmake"
+          $pcreManifest = Join-Path $root "vcpkg\ports\pcre2\vcpkg.json"
+          $version = (Get-Content $pcreManifest -Raw | ConvertFrom-Json).version
+          $portContent = Get-Content $pcrePort -Raw
+
+          # Read the trusted SHA512 digest from this precise vcpkg port.
+          $match = [regex]::Match(
+            $portContent,
+            'set\(sljit_gitlink_hash SHA512 ([a-fA-F0-9]{128})\)'
+          )
+          if (-not $match.Success) {
+            throw "PCRE2 port format changed; inspect portfile.cmake before proceeding"
+          }
+          $expectedSha512 = $match.Groups[1].Value.ToLowerInvariant()
+
+          $downloadDir = Join-Path $root "vcpkg\downloads"
+          New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
+          $fileName = "pcre2-pcre2-$version-sljit-gitlink.json"
+          $destination = Join-Path $downloadDir $fileName
+          $url = "https://api.github.com/repos/PCRE2Project/pcre2/contents/deps/sljit?ref=pcre2-$version"
+          $headers = @{
+            Authorization = "Bearer $env:GH_TOKEN"
+            Accept = "application/vnd.github+json"
+            "X-GitHub-Api-Version" = "2022-11-28"
+            "User-Agent" = "OpenIPC-fpv4win-CI"
+          }
+
+          Write-Host "Downloading authenticated PCRE2 submodule metadata for version $version"
+          Invoke-WebRequest -Uri $url -Headers $headers -OutFile $destination -ErrorAction Stop
+
+          $data = Get-Content $destination -Raw | ConvertFrom-Json
+          if ($data.type -ne "submodule" -or
+              $data.submodule_git_url -ne "https://github.com/zherczeg/sljit.git" -or
+              $data.sha -notmatch '^[a-fA-F0-9]{40}$') {
+            throw "Unexpected PCRE2 submodule metadata received"
+          }
+
+          $actualSha512 = (Get-FileHash -Path $destination -Algorithm SHA512).Hash.ToLowerInvariant()
+          if ($actualSha512 -ne $expectedSha512) {
+            Remove-Item $destination -Force
+            throw "PCRE2 metadata hash differs from vcpkg portfile; do not bypass integrity verification"
+          }
+
+          Write-Host "PCRE2 metadata SHA512 verified and cached for vcpkg"
 
       - name: Install dependencies including pkgconf
         run: |
@@ -61,7 +112,6 @@ jobs:
           }
 
           $env:PKG_CONFIG_PATH = "$libPc;$sharePc"
-
           & $pkgconf --version
           if ($LASTEXITCODE -ne 0) {
             throw "pkgconf is not working"
@@ -82,11 +132,9 @@ jobs:
       - name: Build fpv4win
         run: |
           cmake --build build --config Release --target fpv4win --parallel 2
-
           if ($LASTEXITCODE -ne 0) {
             throw "C++ build failed"
           }
-
           if (-not (Test-Path "build\Release\fpv4win.exe")) {
             throw "Build finished but fpv4win.exe was not found"
           }
