@@ -46,8 +46,37 @@ jobs:
           .\bootstrap-vcpkg.bat
           .\vcpkg integrate install
           .\vcpkg install libusb libpcap libsodium ffmpeg qt5 sdl2 vcpkg-tool-ninja
+          .\vcpkg install pkgconf:x64-windows
           cd ..
-          cmake "-DCMAKE_TOOLCHAIN_FILE=D:/a/fpv4win/fpv4win/vcpkg/scripts/buildsystems/vcpkg.cmake" -S ./ -B "build"
+
+# Xac dinh duong dan vcpkg va pkgconf
+$root = (Get-Location).Path
+
+$pkgconf = Join-Path $root "vcpkg\installed\x64-windows\tools\pkgconf\pkgconf.exe"
+
+if (-not (Test-Path $pkgconf)) {
+    throw "Khong tim thay pkgconf.exe"
+}
+
+# Duong dan thong tin thu vien .pc
+$libPc = Join-Path $root "vcpkg\installed\x64-windows\lib\pkgconfig"
+$sharePc = Join-Path $root "vcpkg\installed\x64-windows\share\pkgconfig"
+
+$env:PKG_CONFIG_PATH = "$libPc;$sharePc"
+
+# Kiem tra cong cu
+& $pkgconf --version
+
+# Cau hinh CMake
+$toolchain = Join-Path $root "vcpkg\scripts\buildsystems\vcpkg.cmake"
+
+cmake -S . -B build `
+    "-DCMAKE_TOOLCHAIN_FILE=$toolchain" `
+    "-DPKG_CONFIG_EXECUTABLE=$pkgconf"
+
+if ($LASTEXITCODE -ne 0) {
+    throw "CMake configuration failed"
+}
           cmake --build build --config Release --target fpv4win
           cp gs.key build/Release/
           Invoke-WebRequest -Uri https://github.com/pbatard/libwdi/releases/download/v1.5.0/zadig-2.8.exe -OutFile build/Release/zadig-2.8.exe
