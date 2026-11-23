@@ -24,15 +24,15 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Set up MSVC compiler
-        uses: ilammy/msvc-dev-cmd@v1.4.1
-
-      - name: Checkout vcpkg
+      # Use current vcpkg instead of the old pinned commit.
+      - name: Checkout current vcpkg
         uses: actions/checkout@v4
         with:
           repository: microsoft/vcpkg
-          ref: b27651341123a59f7187b42ef2bc476284afb310
           path: vcpkg
+
+      - name: Set up MSVC compiler
+        uses: ilammy/msvc-dev-cmd@v1.4.1
 
       - name: Bootstrap vcpkg
         run: |
@@ -61,12 +61,12 @@ jobs:
           }
 
           $env:PKG_CONFIG_PATH = "$libPc;$sharePc"
+
           & $pkgconf --version
           if ($LASTEXITCODE -ne 0) {
             throw "pkgconf is not working"
           }
 
-          # Convert backslashes to forward slashes for CMake arguments.
           $toolchainCmake = $toolchain.Replace('\', '/')
           $pkgconfCmake = $pkgconf.Replace('\', '/')
 
@@ -82,9 +82,11 @@ jobs:
       - name: Build fpv4win
         run: |
           cmake --build build --config Release --target fpv4win --parallel 2
+
           if ($LASTEXITCODE -ne 0) {
             throw "C++ build failed"
           }
+
           if (-not (Test-Path "build\Release\fpv4win.exe")) {
             throw "Build finished but fpv4win.exe was not found"
           }
