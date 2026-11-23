@@ -40,3 +40,4 @@ It is recommended to use with [OpenIPC](https://github.com/OpenIPC) FPV
 ### How to build
 - Take a look at
 [GithubAction](https://github.com/openipc/fpv4win/blob/main/.github/workflows/msbuild.yml)
+Headless receiver prototype build test.
